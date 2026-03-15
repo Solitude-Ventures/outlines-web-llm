@@ -49,12 +49,21 @@ The result: the model can only produce token sequences that form valid JSON matc
 
 ## Quick start
 
+No build step, no npm, no dependencies -- just clone and open:
+
 ```bash
+git clone https://github.com/Solitude-Ventures/outlines-web-llm.git
+cd outlines-web-llm
 python3 serve.py
-# → http://localhost:8765/base.html
 ```
 
-Load the model (~700 MB, cached persistently in browser), pick a mode, send a message.
+Open [http://localhost:8765/base.html](http://localhost:8765/base.html) in Chrome or Edge (WebGPU required).
+
+1. Click **Load Model** -- downloads ~700 MB on first run, then cached persistently in the browser.
+2. Pick a mode (Sentiment, Entity extraction, Tool calling, or Plain chat).
+3. Type a message and press Enter.
+
+That's it. Everything runs locally -- no API keys, no backend, no network after the initial model download.
 
 ## Modes
 
@@ -65,15 +74,22 @@ Load the model (~700 MB, cached persistently in browser), pick a mode, send a me
 | **Entity extraction** | Grammar-constrained (outlines DFA) | `{ people, organizations, locations, dates }` |
 | **Tool calling** | Retry with validation | `[{ name, arguments }]` |
 
+## Requirements
+
+- A browser with **WebGPU** support (Chrome 113+, Edge 113+)
+- Python 3 for the included dev server
+
+> **Why can't I just open `base.html` directly?** The app needs [cross-origin isolation](https://web.dev/articles/cross-origin-isolation-guide) headers (`COOP`/`COEP`) for `SharedArrayBuffer`, which ONNX Runtime uses for multi-threaded WASM execution. Browsers don't send these headers for `file://` URLs. The included `serve.py` adds them automatically -- any HTTP server that sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: credentialless` will also work.
+
 ## Rebuilding the WASM module
 
-Requires Rust, wasm-pack, and the `wasm32-unknown-unknown` target.
+Only needed if you want to update outlines-core. Requires [Rust](https://rustup.rs/) and [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/):
 
 ```bash
 ./build-outlines-wasm.sh
 ```
 
-The script clones `outlines-core` at a pinned tag (currently `0.2.14`), applies two patches to make `tokenizers` optional (it uses native code incompatible with WASM), creates the wasm-bindgen wrapper, builds with `wasm-pack`, and copies the output files. The build directory is cleaned up automatically.
+The script clones `outlines-core` at a pinned tag (currently `0.2.14`), applies two small patches to make `tokenizers` optional (it uses native code incompatible with WASM), creates the wasm-bindgen wrapper, builds with `wasm-pack`, copies the outputs, and cleans up. The pre-built WASM is included in the repo so this step is not required to run the app.
 
 ## Key dependencies
 

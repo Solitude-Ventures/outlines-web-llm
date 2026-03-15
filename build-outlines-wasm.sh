@@ -5,70 +5,61 @@ set -euo pipefail
 OUTLINES_CORE_REPO="https://github.com/dottxt-ai/outlines-core.git"
 OUTLINES_CORE_TAG="0.2.14"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SCRIPT_DIR/.outlines-build"
+IMAGE_NAME="outlines-wasm-builder"
 OUTPUT_JS="$SCRIPT_DIR/outlines_wasm.js"
 OUTPUT_WASM="$SCRIPT_DIR/outlines_wasm_bg.wasm"
 
-# --- Prerequisites ---
-for cmd in git rustup wasm-pack; do
-  if ! command -v "$cmd" &>/dev/null; then
-    echo "ERROR: '$cmd' is required but not found in PATH" >&2
-    exit 1
-  fi
-done
-
-if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
-  echo "Adding wasm32-unknown-unknown target..."
-  rustup target add wasm32-unknown-unknown
+if ! command -v docker &>/dev/null; then
+  echo "ERROR: docker is required but not found in PATH" >&2
+  exit 1
 fi
 
-# --- Clean slate ---
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR"
-echo "Build directory: $BUILD_DIR"
+# --- Write ephemeral build script (COPYed into the image) ---
+cat > "$SCRIPT_DIR/.build-inner.sh" << 'INNER'
+#!/usr/bin/env bash
+set -euo pipefail
 
-# --- Clone outlines-core at pinned tag ---
-echo "Cloning outlines-core @ ${OUTLINES_CORE_TAG}..."
-git clone --depth 1 --branch "$OUTLINES_CORE_TAG" \
-  "$OUTLINES_CORE_REPO" "$BUILD_DIR/outlines-core" 2>&1 | tail -1
+REPO="$1"; TAG="$2"
 
-# --- Patch 1: Make tokenizers optional in Cargo.toml ---
-# Stock has tokenizers as a required dependency. We make it optional so the
-# crate can compile for wasm32 without pulling in native-only tokenizers code.
-echo "Patching outlines-core/Cargo.toml..."
-CARGO_TOML="$BUILD_DIR/outlines-core/Cargo.toml"
+echo "==> Cloning outlines-core @ ${TAG}..."
+git clone --depth 1 --branch "$TAG" "$REPO" /build/outlines-core 2>&1 | tail -1
 
-# Add optional = true to [dependencies.tokenizers]
-sed -i.bak '/^\[dependencies\.tokenizers\]/,/^$/{
+# -- Patch Cargo.toml: make tokenizers optional --
+echo "==> Patching Cargo.toml..."
+sed -i '/^\[dependencies\.tokenizers\]/,/^$/{
   /^default-features/a\
 optional = true
-}' "$CARGO_TOML"
+}' /build/outlines-core/Cargo.toml
 
-# Add "tokenizers" to the hugginface-hub feature so it pulls tokenizers when enabled
-sed -i.bak 's/^hugginface-hub = \["hf-hub",/hugginface-hub = ["hf-hub", "tokenizers",/' "$CARGO_TOML"
+sed -i 's/^hugginface-hub = \["hf-hub",/hugginface-hub = ["hf-hub", "tokenizers",/' \
+  /build/outlines-core/Cargo.toml
 
-rm -f "$CARGO_TOML.bak"
+# -- Patch error.rs: guard TokenizersError behind cfg --
+echo "==> Patching error.rs..."
+sed -i 's|    #\[error(transparent)\]|    #[cfg(feature = "hugginface-hub")]\n    #[error(transparent)]|' \
+  /build/outlines-core/src/error.rs
 
-# --- Patch 2: Guard TokenizersError behind cfg in error.rs ---
-# Without this, error.rs references tokenizers::Error unconditionally which
-# fails to compile when tokenizers is not enabled.
-echo "Patching outlines-core/src/error.rs..."
-ERROR_RS="$BUILD_DIR/outlines-core/src/error.rs"
+# -- Create wrapper crate --
+echo "==> Creating outlines-wasm wrapper..."
+mkdir -p /build/outlines-wasm/src
+cp /build/wrapper-Cargo.toml /build/outlines-wasm/Cargo.toml
+cp /build/wrapper-lib.rs     /build/outlines-wasm/src/lib.rs
 
-sed -i.bak 's|    #\[error(transparent)\]|    #[cfg(feature = "hugginface-hub")]\n    #[error(transparent)]|' "$ERROR_RS"
-rm -f "$ERROR_RS.bak"
+# -- Build --
+echo "==> Building with wasm-pack..."
+(cd /build/outlines-wasm && wasm-pack build --target web --release 2>&1)
 
-# --- Verify patches compile ---
-echo "Verifying outlines-core compiles for wasm32 (no default features)..."
-(cd "$BUILD_DIR/outlines-core" && \
-  cargo check --target wasm32-unknown-unknown --no-default-features --lib 2>&1 | tail -3)
+# -- Output --
+cp /build/outlines-wasm/pkg/outlines_wasm_bg.wasm /output/outlines_wasm_bg.wasm
+cp /build/outlines-wasm/pkg/outlines_wasm.js      /output/outlines_wasm.js
+SIZE=$(wc -c < /output/outlines_wasm_bg.wasm | tr -d ' ')
+echo ""
+echo "Build complete: outlines-core @ $TAG  |  outlines_wasm_bg.wasm ($(( SIZE / 1024 )) KB)"
+INNER
+chmod +x "$SCRIPT_DIR/.build-inner.sh"
 
-# --- Create outlines-wasm wrapper crate ---
-echo "Creating outlines-wasm wrapper crate..."
-WASM_CRATE="$BUILD_DIR/outlines-wasm"
-mkdir -p "$WASM_CRATE/src"
-
-cat > "$WASM_CRATE/Cargo.toml" << 'TOML'
+# --- Write wrapper crate files (COPYed into the image) ---
+cat > "$SCRIPT_DIR/.wrapper-Cargo.toml" << 'TOML'
 [package]
 name = "outlines-wasm"
 version = "0.1.0"
@@ -94,7 +85,7 @@ strip = true
 panic = 'abort'
 TOML
 
-cat > "$WASM_CRATE/src/lib.rs" << 'RUST'
+cat > "$SCRIPT_DIR/.wrapper-lib.rs" << 'RUST'
 use std::sync::Mutex;
 
 use js_sys::Uint32Array;
@@ -198,22 +189,45 @@ pub fn free_index(handle: u32) -> Result<(), JsValue> {
 }
 RUST
 
-# --- Build with wasm-pack ---
-echo "Building outlines-wasm with wasm-pack (release, --target web)..."
-(cd "$WASM_CRATE" && wasm-pack build --target web --release 2>&1)
+# --- Build Docker image ---
+echo "Building Docker image ($IMAGE_NAME)..."
+docker build -t "$IMAGE_NAME" -f - "$SCRIPT_DIR" << 'DOCKERFILE'
+FROM rust:1.85-slim-bookworm
 
-# --- Copy outputs ---
-echo "Copying build artifacts..."
-cp "$WASM_CRATE/pkg/outlines_wasm_bg.wasm" "$OUTPUT_WASM"
-cp "$WASM_CRATE/pkg/outlines_wasm.js"      "$OUTPUT_JS"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git curl ca-certificates pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-WASM_SIZE=$(wc -c < "$OUTPUT_WASM" | tr -d ' ')
+RUN cargo install wasm-pack --version 0.13.1 --locked \
+    && rustup target add wasm32-unknown-unknown
+
+WORKDIR /build
+COPY .build-inner.sh       /build/build-inner.sh
+COPY .wrapper-Cargo.toml   /build/wrapper-Cargo.toml
+COPY .wrapper-lib.rs       /build/wrapper-lib.rs
+
+ENTRYPOINT ["/build/build-inner.sh"]
+DOCKERFILE
+
+# --- Clean up ephemeral files ---
+rm -f "$SCRIPT_DIR/.build-inner.sh" "$SCRIPT_DIR/.wrapper-Cargo.toml" "$SCRIPT_DIR/.wrapper-lib.rs"
+
+# --- Run build in container ---
 echo ""
-echo "Build complete:"
-echo "  outlines-core tag: $OUTLINES_CORE_TAG"
-echo "  $OUTPUT_JS"
-echo "  $OUTPUT_WASM ($(( WASM_SIZE / 1024 )) KB)"
+echo "Running build in container..."
+docker run --rm \
+  -v "$SCRIPT_DIR:/output" \
+  "$IMAGE_NAME" \
+  "$OUTLINES_CORE_REPO" "$OUTLINES_CORE_TAG"
 
-# --- Clean up build directory ---
-rm -rf "$BUILD_DIR"
-echo "Cleaned up $BUILD_DIR"
+# --- Verify ---
+if [[ -f "$OUTPUT_WASM" && -f "$OUTPUT_JS" ]]; then
+  WASM_SIZE=$(wc -c < "$OUTPUT_WASM" | tr -d ' ')
+  echo ""
+  echo "Done:"
+  echo "  $OUTPUT_JS"
+  echo "  $OUTPUT_WASM ($(( WASM_SIZE / 1024 )) KB)"
+else
+  echo "ERROR: Build artifacts not found" >&2
+  exit 1
+fi

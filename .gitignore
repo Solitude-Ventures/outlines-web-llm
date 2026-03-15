@@ -1,3 +1,6 @@
 .outlines-build/
+.build-inner.sh
+.wrapper-Cargo.toml
+.wrapper-lib.rs
 .cursor/
 .DS_Store

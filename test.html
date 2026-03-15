@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>State Management Tests</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; color: #eee; font-family: 'Menlo', monospace; font-size: 13px; padding: 20px; }
+  h1 { font-size: 16px; margin-bottom: 12px; }
+  .suite { margin-bottom: 24px; }
+  .test { padding: 6px 10px; border-radius: 4px; margin: 4px 0; }
+  .pass { background: rgba(34,197,94,0.15); color: #22c55e; }
+  .fail { background: rgba(239,68,68,0.15); color: #ef4444; }
+  .pending { background: rgba(245,158,11,0.15); color: #f59e0b; }
+  .detail { font-size: 11px; color: #888; margin-left: 16px; }
+  #app-container { display: none; }
+  .summary { margin-top: 16px; padding: 10px; border-radius: 6px; font-weight: bold; }
+  .summary.all-pass { background: rgba(34,197,94,0.2); color: #22c55e; }
+  .summary.has-fail { background: rgba(239,68,68,0.2); color: #ef4444; }
+</style>
+</head>
+<body>
+<h1>Worker State Management Tests</h1>
+<div id="results"></div>
+<div id="app-container"><div id="root"></div></div>
+
+<script type="text/babel" data-type="module">
+
+// ─── Test infrastructure ────────────────────────────────────────────────────
+
+const results = [];
+function log(name, pass, detail) {
+  results.push({ name, pass, detail });
+}
+
+function renderResults() {
+  const el = document.getElementById("results");
+  const passed = results.filter(r => r.pass).length;
+  const failed = results.filter(r => !r.pass).length;
+  el.innerHTML = results.map(r =>
+    `<div class="test ${r.pass ? "pass" : "fail"}">${r.pass ? "✓" : "✗"} ${r.name}${r.detail ? `<div class="detail">${r.detail}</div>` : ""}</div>`
+  ).join("") +
+  `<div class="summary ${failed ? "has-fail" : "all-pass"}">${passed}/${results.length} passed, ${failed} failed</div>`;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ─── MockWorker ─────────────────────────────────────────────────────────────
+
+class MockWorker {
+  constructor() {
+    this.onmessage = null;
+    this.onerror = null;
+    this._inbox = [];
+  }
+  postMessage(data) {
+    this._inbox.push(data);
+  }
+  terminate() {}
+  _emit(data) {
+    if (this.onmessage) this.onmessage({ data });
+  }
+  _emitError(message) {
+    if (this.onerror) this.onerror({ message });
+  }
+}
+
+// ─── App component (extracted from base.html, no real worker) ───────────────
+
+const { useState, useEffect, useRef, useCallback } = React;
+
+const PRESETS = {
+  plain: { label: "Plain chat", mode: "plain" },
+  sentiment: {
+    label: "Sentiment analysis", mode: "json_schema",
+    schema: { jsonSchema: {
+      type: "object",
+      properties: {
+        sentiment: { type: "string", enum: ["positive","negative","neutral","mixed"] },
+        confidence: { type: "number" },
+        reasoning: { type: "string" },
+      },
+      required: ["sentiment","confidence","reasoning"],
+    }},
+  },
+};
+
+function highlightJson(data) {
+  return JSON.stringify(data, null, 2)
+    .replace(/("(?:\\.|[^"\\])*")\s*:/g, '<span class="json-key">$1</span>:')
+    .replace(/:\s*("(?:\\.|[^"\\])*")/g, ': <span class="json-str">$1</span>')
+    .replace(/:\s*(\d+\.?\d*)/g, ': <span class="json-num">$1</span>')
+    .replace(/:\s*(true|false|null)/g, ': <span class="json-bool">$1</span>');
+}
+
+function formatBytes(b) {
+  if (!b || b < 1024) return (b || 0) + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+
+let _workerRef = null;
+
+function App() {
+  const [messages, setMessages]           = useState([]);
+  const [input, setInput]                 = useState("");
+  const [status, setStatus]               = useState("idle");
+  const [progress, setProgress]           = useState(null);
+  const [error, setError]                 = useState(null);
+  const [streaming, setStreaming]          = useState("");
+  const [preset, setPreset]               = useState("plain");
+  const [structResult, setStructResult]   = useState(null);
+  const [retry, setRetry]                 = useState(null);
+  const worker  = useRef(null);
+  const chatRef = useRef(null);
+  const inpRef  = useRef(null);
+
+  useEffect(() => {
+    chatRef.current && (chatRef.current.scrollTop = chatRef.current.scrollHeight);
+  }, [messages, streaming, structResult]);
+
+  useEffect(() => {
+    const w = new MockWorker();
+
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === "status")   { setStatus(m.status); if (m.status === "ready") setProgress(null); }
+      if (m.type === "progress") {
+        setProgress(prev => {
+          const next = { ...(prev || {}) };
+          if (m.progress?.file) next[m.progress.file] = m.progress;
+          return next;
+        });
+      }
+      if (m.type === "token")    setStreaming(m.fullText);
+      if (m.type === "retry")    { setRetry({ attempt: m.attempt, reason: m.reason }); setStreaming(""); }
+      if (m.type === "done") {
+        setMessages(prev => [...prev, { role: "assistant", content: m.fullText, structured: m.structured || null, mode: m.mode }]);
+        setStreaming(""); setRetry(null);
+        if (m.structured) setStructResult(m.structured);
+        setStatus("ready");
+      }
+      if (m.type === "error") { setError(m.error || "Unknown error"); }
+    };
+
+    w.onerror = (e) => { setError(String(e.message || "Worker crashed")); setStatus("idle"); };
+
+    worker.current = w;
+    _workerRef = w;
+    return () => { w.terminate(); };
+  }, []);
+
+  const load = useCallback(() => { setError(null); setProgress({}); worker.current?.postMessage({ type: "load" }); }, []);
+
+  const send = useCallback(() => {
+    const txt = input.trim();
+    if (!txt || status !== "ready") return;
+    const p = PRESETS[preset];
+    const userMsg = { role: "user", content: txt };
+    const next = [...messages, userMsg];
+    setMessages(next); setInput(""); setStreaming(""); setStructResult(null); setRetry(null);
+    const chat = next.filter(m => m.role !== "system").map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
+    worker.current?.postMessage({ type: "generate", messages: chat, options: { mode: p.mode, schema: p.schema || null, maxRetries: p.mode === "plain" ? 0 : 2 } });
+    inpRef.current?.focus();
+  }, [input, messages, status, preset]);
+
+  const stop = useCallback(() => { worker.current?.postMessage({ type: "stop" }); }, []);
+
+  const p = PRESETS[preset];
+  const fileEntries = progress && typeof progress === "object" ? Object.entries(progress) : [];
+  const totalLoaded = fileEntries.reduce((s, [, f]) => s + (f.loaded || 0), 0);
+  const totalSize   = fileEntries.reduce((s, [, f]) => s + (f.total || 0), 0);
+  const overallPct  = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
+  const doneFiles   = fileEntries.filter(([, f]) => f.status === "done").length;
+  const dotColor = status === "ready" ? "var(--green,#22c55e)" : status === "generating" ? "var(--accent,#6d5ce7)" : status === "loading" ? "var(--amber,#f59e0b)" : "var(--text-dim,#76768a)";
+  const statusLabel = status === "idle" ? "not loaded" : status === "loading" ? "loading…" : status === "generating" ? "generating…" : "ready";
+
+  return (
+    <div className="app">
+      <div className="header">
+        <div className="status">
+          <span className="dot" data-testid="status-dot" style={{ width:6,height:6,borderRadius:'50%',display:'inline-block',backgroundColor: dotColor }} />
+          <span className="status-txt" data-testid="status-label">{statusLabel}</span>
+        </div>
+      </div>
+      <div className="chat" ref={chatRef}>
+        {status === "idle" && messages.length === 0 && (
+          <div className="empty" data-testid="empty-state">
+            <h2>Structured Output</h2>
+            {error && <div className="error-box" data-testid="idle-error" style={{ padding:'8px 12px',borderRadius:6,background:'rgba(239,68,68,0.1)',border:'1px solid #ef4444',color:'#ef4444',fontSize:12,maxWidth:420,margin:'6px auto' }}><strong>Error:</strong> {error}</div>}
+            <button data-testid="load-btn" onClick={load}>{error ? "Retry" : "Load Model"}</button>
+          </div>
+        )}
+        {status === "loading" && (
+          <div className="loading" data-testid="loading-state">
+            <p>Loading…</p>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} data-testid={`msg-${m.role}-${i}`}>
+            <span>{m.content}</span>
+          </div>
+        ))}
+        {streaming && <div data-testid="streaming">{streaming}</div>}
+        {error && <div data-testid="error-box" style={{ padding:'8px 12px',borderRadius:6,background:'rgba(239,68,68,0.1)',border:'1px solid #ef4444',color:'#ef4444',fontSize:12 }}><strong>Error:</strong> {error}</div>}
+      </div>
+      <div className="input-bar">
+        <input
+          ref={inpRef}
+          data-testid="chat-input"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          disabled={status !== "ready"}
+        />
+        <button data-testid="send-btn" onClick={send} disabled={status !== "ready" || !input.trim()}>Send</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Mount app ──────────────────────────────────────────────────────────────
+
+const container = document.getElementById("app-container");
+container.style.display = "block";
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+
+// ─── Test runner ────────────────────────────────────────────────────────────
+
+async function waitFor(fn, timeout = 2000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try { if (fn()) return true; } catch {}
+    await sleep(50);
+  }
+  return false;
+}
+
+function getTestId(id) { return document.querySelector(`[data-testid="${id}"]`); }
+
+async function resetApp() {
+  root.render(<App key={Math.random()} />);
+  await sleep(100);
+}
+
+async function runTests() {
+
+  // ── Test 1: Happy path load ─────────────────────────────────────────────
+  {
+    await resetApp();
+    const w = _workerRef;
+    const label = () => getTestId("status-label");
+
+    // initial state
+    log("1a. Initial status is 'not loaded'",
+      label()?.textContent === "not loaded",
+      `Got: "${label()?.textContent}"`);
+
+    // click load
+    getTestId("load-btn")?.click();
+    await sleep(50);
+    log("1b. Load button sends 'load' message to worker",
+      w._inbox.some(m => m.type === "load"),
+      `Inbox: ${JSON.stringify(w._inbox)}`);
+
+    // simulate worker responding
+    w._emit({ type: "status", status: "loading" });
+    await sleep(50);
+    log("1c. Status changes to 'loading…'",
+      label()?.textContent === "loading…",
+      `Got: "${label()?.textContent}"`);
+
+    // progress events
+    w._emit({ type: "progress", progress: { file: "model.onnx", status: "progress", progress: 50, loaded: 500, total: 1000 } });
+    await sleep(50);
+    w._emit({ type: "progress", progress: { file: "model.onnx", status: "done" } });
+    await sleep(50);
+
+    // ready
+    w._emit({ type: "status", status: "ready" });
+    await sleep(50);
+    log("1d. Status changes to 'ready'",
+      label()?.textContent === "ready",
+      `Got: "${label()?.textContent}"`);
+
+    const inp = getTestId("chat-input");
+    log("1e. Input is enabled when ready",
+      inp && !inp.disabled,
+      `Disabled: ${inp?.disabled}`);
+  }
+
+  // ── Test 2: Load error with message ─────────────────────────────────────
+  {
+    await resetApp();
+    const w = _workerRef;
+    const label = () => getTestId("status-label");
+
+    getTestId("load-btn")?.click();
+    await sleep(50);
+    w._emit({ type: "status", status: "loading" });
+    await sleep(50);
+
+    // error with a real message
+    w._emit({ type: "error", error: "GPU initialization failed" });
+    w._emit({ type: "status", status: "idle" });
+    await sleep(100);
+
+    log("2a. Status reverts to 'not loaded' on load error",
+      label()?.textContent === "not loaded",
+      `Got: "${label()?.textContent}"`);
+
+    const errBox = getTestId("idle-error");
+    log("2b. Error box is visible in idle state",
+      !!errBox,
+      `Error box found: ${!!errBox}`);
+
+    log("2c. Error message content is correct",
+      errBox?.textContent?.includes("GPU initialization failed"),
+      `Got: "${errBox?.textContent}"`);
+
+    const btn = getTestId("load-btn");
+    log("2d. Button says 'Retry' when error present",
+      btn?.textContent === "Retry",
+      `Got: "${btn?.textContent}"`);
+  }
+
+  // ── Test 3: Load error with EMPTY message ───────────────────────────────
+  {
+    await resetApp();
+    const w = _workerRef;
+    const label = () => getTestId("status-label");
+
+    getTestId("load-btn")?.click();
+    await sleep(50);
+    w._emit({ type: "status", status: "loading" });
+    await sleep(50);
+
+    // error with empty string
+    w._emit({ type: "error", error: "" });
+    w._emit({ type: "status", status: "idle" });
+    await sleep(100);
+
+    log("3a. Status reverts to idle on empty error",
+      label()?.textContent === "not loaded",
+      `Got: "${label()?.textContent}"`);
+
+    const errBox = getTestId("idle-error");
+    log("3b. Error box STILL visible for empty string error (BUG CHECK)",
+      !!errBox,
+      `Error box found: ${!!errBox}, error value is empty string`);
+
+    const btn = getTestId("load-btn");
+    log("3c. Button says 'Retry' even for empty error (BUG CHECK)",
+      btn?.textContent === "Retry",
+      `Got: "${btn?.textContent}"`);
+  }
+
+  // ── Test 4: Library import error ────────────────────────────────────────
+  {
+    await resetApp();
+    const w = _workerRef;
+
+    // Library error arrives without any status change (IIFE returned early)
+    w._emit({ type: "error", error: "Failed to load library: NetworkError" });
+    await sleep(100);
+
+    const errBox = getTestId("idle-error");
+    log("4a. Library import error is visible in idle state",
+      !!errBox,
+      `Error box found: ${!!errBox}`);
+
+    log("4b. Error content shows library failure",
+      errBox?.textContent?.includes("Failed to load library"),
+      `Got: "${errBox?.textContent}"`);
+  }
+
+  // ── Test 5: Successful generation ───────────────────────────────────────
+  {
+    await resetApp();
+    const w = _workerRef;
+    const label = () => getTestId("status-label");
+
+    // First, put app into "ready" state
+    w._emit({ type: "status", status: "ready" });
+    await sleep(100);
+
+    log("5a. Status is ready before generation",
+      label()?.textContent === "ready",
+      `Got: "${label()?.textContent}"`);
+
+    // Simulate generation
+    w._emit({ type: "status", status: "generating" });
+    await sleep(50);
+    log("5b. Status changes to generating",
+      label()?.textContent === "generating…",
+      `Got: "${label()?.textContent}"`);
+
+    w._emit({ type: "token", token: "Hello", fullText: "Hello" });
+    await sleep(50);
+    const streamEl = getTestId("streaming");
+    log("5c. Streaming text appears",
+      !!streamEl && streamEl.textContent.includes("Hello"),
+      `Streaming el: ${streamEl?.textContent}`);
+
+    w._emit({ type: "done", fullText: "Hello world!", mode: "plain" });
+    await sleep(100);
+
+    log("5d. Status returns to ready after done",
+      label()?.textContent === "ready",
+      `Got: "${label()?.textContent}"`);
+
+    const msg = getTestId("msg-assistant-0");
+    log("5e. Assistant message appears in chat",
+      !!msg && msg.textContent.includes("Hello world!"),
+      `Message el: ${msg?.textContent}`);
+  }
+
+  // ── Test 6: Worker crash (onerror) ──────────────────────────────────────
+  {
+    await resetApp();
+    const w = _workerRef;
+    const label = () => getTestId("status-label");
+
+    // Put into loading state first
+    w._emit({ type: "status", status: "loading" });
+    await sleep(50);
+
+    // Simulate worker crash
+    w._emitError("Uncaught TypeError: x is not a function");
+    await sleep(100);
+
+    log("6a. Status reverts to idle on worker crash",
+      label()?.textContent === "not loaded",
+      `Got: "${label()?.textContent}"`);
+
+    const errBox = getTestId("idle-error");
+    log("6b. Worker crash error is visible",
+      !!errBox,
+      `Error box found: ${!!errBox}`);
+
+    log("6c. Error mentions the crash reason",
+      errBox?.textContent?.includes("TypeError"),
+      `Got: "${errBox?.textContent}"`);
+  }
+
+  // ── Test 7: Error with undefined message ────────────────────────────────
+  {
+    await resetApp();
+    const w = _workerRef;
+
+    w._emit({ type: "error", error: undefined });
+    w._emit({ type: "status", status: "idle" });
+    await sleep(100);
+
+    const errBox = getTestId("idle-error");
+    log("7a. Error box visible for undefined error (BUG CHECK)",
+      !!errBox,
+      `Error box found: ${!!errBox}`);
+  }
+
+  // ── Test 8: onerror with empty message ──────────────────────────────────
+  {
+    await resetApp();
+    const w = _workerRef;
+
+    w._emitError("");
+    await sleep(100);
+
+    const errBox = getTestId("idle-error");
+    log("8a. onerror with empty message shows 'Worker crashed'",
+      errBox?.textContent?.includes("Worker crashed"),
+      `Got: "${errBox?.textContent}"`);
+  }
+
+  renderResults();
+}
+
+// Wait for React to mount then run
+setTimeout(runTests, 500);
+
+</script>
+</body>
+</html>
