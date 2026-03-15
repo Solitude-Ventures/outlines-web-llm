@@ -81,18 +81,74 @@ That's it. Everything runs locally -- no API keys, no backend, no network after 
 
 > **Why can't I just open `base.html` directly?** The app needs [cross-origin isolation](https://web.dev/articles/cross-origin-isolation-guide) headers (`COOP`/`COEP`) for `SharedArrayBuffer`, which ONNX Runtime uses for multi-threaded WASM execution. Browsers don't send these headers for `file://` URLs. The included `serve.py` adds them automatically -- any HTTP server that sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: credentialless` will also work.
 
+## Minimal wiring example
+
+The three touch points between transformers.js and the outlines WASM module:
+
+```javascript
+// 1. Load both libraries
+const { AutoModelForCausalLM, AutoTokenizer, TextStreamer } =
+  await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.0-next.7");
+const outlines = await import("./outlines_wasm.js");
+await outlines.default();
+
+// 2. Load model + tokenizer
+const tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
+const model = await AutoModelForCausalLM.from_pretrained(MODEL_ID, { device: "webgpu", dtype: "q4" });
+
+// 3. Build vocab map: { "token_string": [id1, id2, ...] }
+const vocab = {};
+for (let id = 0; id < tokenizer.model.config.vocab_size; id++) {
+  const tok = tokenizer.decode([id], { skip_special_tokens: false });
+  if (tok) (vocab[tok] ??= []).push(id);
+}
+
+// 4. Compile JSON schema into a DFA index
+const schema = { type: "object", properties: { sentiment: { type: "string" } }, required: ["sentiment"] };
+const handle = outlines.compile_index(JSON.stringify(schema), JSON.stringify(vocab), eosTokenId);
+
+// 5. Create logits processor — masks invalid tokens each step
+let state = outlines.initial_state(handle);
+const processor = (input_ids, logits) => {
+  const allowed = new Set(outlines.allowed_tokens(handle, state));
+  for (let i = 0; i < logits.data.length; i++)
+    if (!allowed.has(i)) logits.data[i] = -Infinity;
+  return logits;
+};
+
+// 6. Generate with constraint
+const streamer = new TextStreamer(tokenizer, {
+  skip_prompt: true, skip_special_tokens: true,
+  token_callback_function: (toks) => {
+    // Advance DFA state after each token is selected
+    const next = outlines.next_state(handle, state, Number(toks.at(-1)));
+    if (next >= 0n) state = Number(next);
+  },
+});
+
+await model.generate({ ...inputs, logits_processor: [processor], streamer });
+
+// 7. Clean up
+outlines.free_index(handle);
+```
+
+The key idea: `logits_processor` masks tokens *before* selection using `allowed_tokens`, and `token_callback_function` advances the DFA state *after* each token via `next_state`.
+
 ## Rebuilding the WASM module
 
-Only needed if you want to update outlines-core. Requires [Rust](https://rustup.rs/) and [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/):
+Only needed if you want to update outlines-core. Requires [Docker](https://docs.docker.com/get-docker/):
 
 ```bash
 ./build-outlines-wasm.sh
 ```
 
-The script clones `outlines-core` at a pinned tag (currently `0.2.14`), applies two small patches to make `tokenizers` optional (it uses native code incompatible with WASM), creates the wasm-bindgen wrapper, builds with `wasm-pack`, copies the outputs, and cleans up. The pre-built WASM is included in the repo so this step is not required to run the app.
+The script builds a Docker image with Rust 1.85 + wasm-pack, clones `outlines-core` at a pinned tag (currently `0.2.14`), applies two small patches to make `tokenizers` optional (it uses native code incompatible with WASM), creates the wasm-bindgen wrapper, compiles, and copies the outputs. No local Rust toolchain needed. The pre-built WASM is included in the repo so this step is not required to run the app.
 
-## Key dependencies
+## Dependencies
 
-- [transformers.js v4](https://github.com/huggingface/transformers.js) — ONNX model inference via WebGPU
-- [outlines-core](https://github.com/dottxt-ai/outlines-core) — JSON schema → regex → DFA for structured generation
-- [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) — Rust ↔ JS interop for the WASM module
+| Dependency | Version | Role |
+|---|---|---|
+| [transformers.js](https://github.com/huggingface/transformers.js) | 4.0.0-next.7 | ONNX model inference via WebGPU (loaded from CDN) |
+| [outlines-core](https://github.com/dottxt-ai/outlines-core) | 0.2.14 | JSON schema → regex → DFA for structured generation |
+| [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) | 0.2 | Rust ↔ JS interop for the WASM module |
+| [LFM2.5-1.2B-Instruct-ONNX](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-ONNX) | Q4 | Liquid Foundation Model (downloaded to browser cache) |
