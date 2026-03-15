@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LFM2.5 Structured · WebGPU</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  /* ── Reset & base ─────────────────────────────────────────────────── */
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg:          #0b0b0f;
+    --surface:     #131318;
+    --surface-alt: #1a1a22;
+    --border:      #252530;
+    --text:        #dcdce6;
+    --text-dim:    #76768a;
+    --accent:      #6d5ce7;
+    --accent-soft: rgba(109,92,231,0.12);
+    --green:       #22c55e;
+    --green-soft:  rgba(34,197,94,0.12);
+    --amber:       #f59e0b;
+    --red:         #ef4444;
+    --red-soft:    rgba(239,68,68,0.1);
+    --mono:        'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Menlo',monospace;
+  }
+  html, body, #root {
+    height: 100%; width: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    overflow: hidden;
+  }
+
+  /* ── Layout shells ────────────────────────────────────────────────── */
+  .app        { display:flex; flex-direction:column; height:100vh; width:100%; overflow:hidden; }
+  .header     { display:flex; align-items:center; justify-content:space-between; padding:10px 18px; border-bottom:1px solid var(--border); background:var(--surface); flex-shrink:0; }
+  .header-l   { display:flex; align-items:center; gap:10px; }
+  .logo       { font-size:18px; color:var(--accent); }
+  .title      { font-weight:600; font-size:14px; letter-spacing:-0.02em; }
+  .badge      { font-size:10px; color:var(--text-dim); background:var(--bg); padding:2px 7px; border-radius:5px; border:1px solid var(--border); }
+  .status     { display:flex; align-items:center; gap:6px; }
+  .dot        { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+  .status-txt { font-size:11px; color:var(--text-dim); }
+  .reset-btn  { padding:3px 8px; font-size:10px; font-family:var(--mono); background:transparent; color:var(--text-dim); border:1px solid var(--border); border-radius:5px; cursor:pointer; transition:all .15s; margin-left:2px; }
+  .reset-btn:hover { border-color:var(--red); color:var(--red); }
+  .cache-tag  { font-size:10px; color:var(--green); opacity:.7; }
+
+  /* ── Mode bar ─────────────────────────────────────────────────────── */
+  .mode-bar   { display:flex; gap:4px; padding:8px 18px; border-bottom:1px solid var(--border); background:var(--surface); flex-shrink:0; overflow-x:auto; }
+  .mode-btn   { padding:5px 12px; font-size:11px; font-family:var(--mono); background:transparent; color:var(--text-dim); border:1px solid var(--border); border-radius:6px; cursor:pointer; white-space:nowrap; transition:all .15s; }
+  .mode-btn:hover  { border-color:var(--text-dim); }
+  .mode-btn.active { background:var(--accent-soft); color:var(--accent); border-color:var(--accent); }
+
+  /* ── Schema bar ───────────────────────────────────────────────────── */
+  .schema-bar { display:flex; align-items:center; gap:8px; padding:6px 18px; border-bottom:1px solid var(--border); background:var(--surface-alt); flex-shrink:0; }
+  .schema-lbl { font-size:10px; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em; }
+  .schema-val { font-size:11px; color:var(--accent); }
+
+  /* ── Chat area ────────────────────────────────────────────────────── */
+  .chat       { flex:1; overflow-y:auto; padding:20px 18px; display:flex; flex-direction:column; gap:8px; }
+  .empty      { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:10px; padding:40px 20px; }
+  .empty-icon { font-size:42px; color:var(--accent); margin-bottom:4px; }
+  .empty-h    { font-size:20px; font-weight:700; letter-spacing:-0.03em; }
+  .empty-p    { font-size:12px; color:var(--text-dim); max-width:400px; line-height:1.6; }
+  .empty-hint { font-size:10px; color:var(--text-dim); opacity:.5; }
+  .load-btn   { margin-top:6px; padding:9px 26px; background:var(--accent); color:#fff; border:none; border-radius:7px; font-size:13px; font-family:var(--mono); font-weight:600; cursor:pointer; transition:opacity .15s; }
+  .load-btn:hover { opacity:.85; }
+
+  /* Spinner */
+  .spinner    { width:28px; height:28px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .load-label { font-size:12px; color:var(--text-dim); }
+  .prog-track { width:240px; height:3px; background:var(--border); border-radius:2px; overflow:hidden; }
+  .prog-fill  { height:100%; background:var(--accent); border-radius:2px; transition:width .2s; }
+
+  /* ── Detailed loading ───────────────────────────────────────────────── */
+  .load-detail    { width:340px; display:flex; flex-direction:column; gap:10px; margin-top:6px; text-align:center; }
+  .load-overall   { font-size:14px; color:var(--text); font-weight:600; }
+  .load-sub       { font-size:11px; color:var(--text-dim); margin-top:-4px; }
+  .load-files     { display:flex; flex-direction:column; gap:6px; text-align:left; margin-top:4px; }
+  .load-file      { display:flex; flex-direction:column; gap:3px; }
+  .load-file-info { display:flex; justify-content:space-between; align-items:center; }
+  .load-file-name { font-size:10px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .load-file-stat { font-size:10px; color:var(--text); font-variant-numeric:tabular-nums; margin-left:8px; flex-shrink:0; }
+  .load-file-stat.done { color:var(--green); }
+  .file-track     { width:100%; height:2px; background:var(--border); border-radius:1px; overflow:hidden; }
+  .file-fill      { height:100%; border-radius:1px; transition:width .15s; background:var(--accent); }
+  .file-fill.done { background:var(--green); }
+
+  /* ── Messages ─────────────────────────────────────────────────────── */
+  .msg-row    { display:flex; width:100%; }
+  .msg-row.user { justify-content:flex-end; }
+  .msg-row.assistant { justify-content:flex-start; }
+  .bubble-user { max-width:75%; padding:9px 13px; background:var(--surface-alt); border-radius:12px 12px 4px 12px; border:1px solid var(--border); }
+  .bubble-ai   { max-width:88%; padding:9px 0; display:flex; flex-direction:column; gap:6px; }
+  .bubble-lbl  { font-size:10px; font-weight:700; color:var(--accent); text-transform:uppercase; letter-spacing:0.06em; }
+  .bubble-txt  { font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word; }
+  /* ── Generating indicator ─────────────────────────────────────────── */
+  .gen-indicator { display:flex; align-items:center; gap:10px; padding:12px 0; }
+  .gen-spinner   { width:16px; height:16px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; flex-shrink:0; }
+  .gen-text      { font-size:12px; color:var(--text-dim); }
+  .gen-elapsed   { font-size:11px; color:var(--text-dim); opacity:.6; font-variant-numeric:tabular-nums; }
+
+  /* ── Structured output block ──────────────────────────────────────── */
+  .struct-block  { margin-top:4px; border-radius:8px; border:1px solid var(--border); overflow:hidden; }
+  .struct-header { padding:6px 12px; background:var(--green-soft); border-bottom:1px solid var(--border); display:flex; align-items:center; }
+  .struct-badge  { font-size:10px; font-weight:700; color:var(--green); text-transform:uppercase; letter-spacing:0.04em; }
+  .json-block    { margin:0; padding:12px 14px; background:var(--bg); font-size:12px; line-height:1.5; overflow-x:auto; font-family:var(--mono); color:var(--text); }
+  .json-key      { color:var(--accent); }
+  .json-str      { color:var(--green); }
+  .json-num      { color:var(--amber); }
+  .json-bool     { color:var(--amber); }
+
+  /* ── Retry / Error ────────────────────────────────────────────────── */
+  .retry-box  { padding:6px 12px; border-radius:6px; background:rgba(245,158,11,.1); border:1px solid var(--amber); color:var(--amber); font-size:11px; }
+  .error-box  { padding:8px 12px; border-radius:6px; background:var(--red-soft); border:1px solid var(--red); color:var(--red); font-size:12px; }
+
+  /* ── Input bar ────────────────────────────────────────────────────── */
+  .input-bar  { padding:10px 18px 14px; border-top:1px solid var(--border); background:var(--surface); flex-shrink:0; }
+  .input-row  { display:flex; align-items:center; gap:8px; background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:3px 3px 3px 12px; }
+  .input-row input { flex:1; background:transparent; border:none; outline:none; color:var(--text); font-size:13px; font-family:var(--mono); padding:7px 0; }
+  .input-row input::placeholder { color:var(--text-dim); }
+  .input-row input:disabled::placeholder { opacity:.4; }
+  .send-btn, .stop-btn { width:32px; height:32px; border-radius:7px; border:none; color:#fff; font-family:var(--mono); font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; transition:opacity .15s; }
+  .send-btn   { background:var(--accent); font-size:16px; }
+  .stop-btn   { background:var(--red); font-size:12px; }
+  .disclaimer { font-size:10px; color:var(--text-dim); text-align:center; margin-top:6px; opacity:.5; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Web Worker source — runs model inference off the main thread
+// ═══════════════════════════════════════════════════════════════════════
+const WORKER_SRC = `
+const _q = [];
+self.onmessage = (e) => _q.push(e);
+
+(async () => {
+let AutoModelForCausalLM, AutoTokenizer, TextStreamer, InterruptableStoppingCriteria;
+try {
+  ({ AutoModelForCausalLM, AutoTokenizer, TextStreamer, InterruptableStoppingCriteria } =
+    await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.0-next.7"));
+} catch (err) {
+  self.postMessage({ type: "error", error: "Failed to load library: " + String(err?.message || err) });
+  return;
+}
+
+if (!AutoModelForCausalLM || !AutoTokenizer || !TextStreamer || !InterruptableStoppingCriteria) {
+  self.postMessage({ type: "error", error: "Library loaded but exports are missing — CDN may have served the wrong bundle" });
+  return;
+}
+
+let outlinesWasm = null;
+try {
+  const mod = await import("${location.origin}/outlines_wasm.js");
+  await mod.default();
+  outlinesWasm = mod;
+  self.postMessage({ type: "status_detail", detail: "outlines-wasm loaded" });
+} catch (e) {
+  self.postMessage({ type: "status_detail", detail: "outlines-wasm failed: " + String(e?.message || e) });
+}
+
+const MODEL_ID = "LiquidAI/LFM2.5-1.2B-Instruct-ONNX";
+let tokenizer = null;
+let model = null;
+let vocabJson = null;
+let activeDevice = "webgpu";
+const stopping = new InterruptableStoppingCriteria();
+
+/* ── Build vocab JSON for outlines ─────────────────────────────────── */
+function buildVocabJson(tok) {
+  const map = {};
+  const vocabSize = tok.model?.config?.vocab_size ?? 65536;
+  for (let id = 0; id < vocabSize; id++) {
+    try {
+      const token = tok.decode([id], { skip_special_tokens: false });
+      if (token !== undefined && token !== null && token !== "") {
+        if (!map[token]) map[token] = [];
+        map[token].push(id);
+      }
+    } catch {}
+  }
+  return JSON.stringify(map);
+}
+
+/* ── Load ──────────────────────────────────────────────────────────── */
+async function loadModel(cb) {
+  tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID, { progress_callback: cb });
+  if (outlinesWasm) {
+    try {
+      vocabJson = buildVocabJson(tokenizer);
+      self.postMessage({ type: "status_detail", detail: "vocab built, length=" + vocabJson.length });
+    } catch (e) {
+      vocabJson = null;
+      self.postMessage({ type: "status_detail", detail: "vocab build failed: " + String(e?.message || e) });
+    }
+  }
+  try {
+    model = await AutoModelForCausalLM.from_pretrained(MODEL_ID, {
+      device: "webgpu", dtype: "q4", progress_callback: cb,
+    });
+    activeDevice = "webgpu";
+  } catch (gpuErr) {
+    self.postMessage({ type: "fallback", reason: String(gpuErr?.message || gpuErr || "unknown") });
+    model = await AutoModelForCausalLM.from_pretrained(MODEL_ID, {
+      dtype: "q4", progress_callback: cb,
+    });
+    activeDevice = "wasm";
+  }
+}
+
+/* ── System prompt per mode ────────────────────────────────────────── */
+function systemPrompt(schema, mode) {
+  if (schema?.systemPrompt) return schema.systemPrompt;
+  if (mode === "tool_call")
+    return "You are a helpful assistant. Output function calls as JSON.\\nList of tools: " + JSON.stringify(schema.tools);
+  if (mode === "json_schema")
+    return "You are a structured data extraction assistant. You MUST respond with ONLY a valid JSON object matching this exact schema — no markdown, no explanation, no extra text before or after the JSON.\\n\\nJSON Schema:\\n" + JSON.stringify(schema.jsonSchema, null, 2);
+  return "You are a helpful assistant trained by Liquid AI.";
+}
+
+/* ── Parse structured output ───────────────────────────────────────── */
+function parseOutput(text, mode) {
+  if (mode === "tool_call") {
+    const m = text.match(/<\\|tool_call_start\\|>([\\s\\S]*?)<\\|tool_call_end\\|>/);
+    if (m) {
+      const raw = m[1].trim();
+      try { return { ok: true, data: JSON.parse(raw), raw }; }
+      catch { return { ok: true, data: raw, raw, format: "pythonic" }; }
+    }
+    return { ok: false, error: "No tool call found", raw: text };
+  }
+  if (mode === "json_schema") {
+    const t = text.trim();
+    try { return { ok: true, data: JSON.parse(t) }; } catch {}
+    const jm = t.match(/([{\\[][\\s\\S]*[}\\]])/);
+    if (jm) { try { return { ok: true, data: JSON.parse(jm[1]) }; } catch {} }
+    const fm = t.match(/\\\`\\\`\\\`(?:json)?\\s*([\\s\\S]*?)\\\`\\\`\\\`/);
+    if (fm) { try { return { ok: true, data: JSON.parse(fm[1].trim()) }; } catch {} }
+    return { ok: false, error: "Could not parse JSON", raw: text };
+  }
+  return { ok: true, data: text };
+}
+
+/* ── Lightweight schema validation ─────────────────────────────────── */
+function validate(data, schema) {
+  if (!schema) return { valid: true };
+  const errs = [];
+  if (schema.type === "object" && schema.properties) {
+    if (typeof data !== "object" || Array.isArray(data)) return { valid: false, errors: ["Expected object"] };
+    for (const k of schema.required || []) if (!(k in data)) errs.push("Missing: " + k);
+    for (const [k, p] of Object.entries(schema.properties)) {
+      if (k in data) {
+        const got = Array.isArray(data[k]) ? "array" : typeof data[k];
+        if (p.type && got !== p.type) errs.push(k + ": expected " + p.type + ", got " + got);
+        if (p.enum && !p.enum.includes(data[k])) errs.push(k + ": must be one of " + JSON.stringify(p.enum));
+      }
+    }
+  }
+  if (schema.type === "array" && !Array.isArray(data)) return { valid: false, errors: ["Expected array"] };
+  return { valid: errs.length === 0, errors: errs };
+}
+
+/* ── Grammar-constrained logits processor ──────────────────────────── */
+function makeGrammarProcessor(handle, wasm) {
+  let state = wasm.initial_state(handle);
+  const processor = (input_ids, logits) => {
+    const allowed = wasm.allowed_tokens(handle, state);
+    const allowedSet = new Set(allowed);
+    const data = logits.data;
+    for (let i = 0; i < data.length; i++) {
+      if (!allowedSet.has(i)) data[i] = -Infinity;
+    }
+    return logits;
+  };
+  processor._call = processor;
+  processor.acceptToken = (tokenId) => {
+    const next = wasm.next_state(handle, state, Number(tokenId));
+    if (next >= 0n) state = Number(next);
+  };
+  return processor;
+}
+
+/* ── Generate (with retry for structured modes) ────────────────────── */
+async function generate(messages, opts = {}) {
+  if (!tokenizer || !model) throw new Error("Model not loaded");
+  const { mode = "plain", schema = null, maxRetries = 2 } = opts;
+  const sys = systemPrompt(schema, mode);
+  const full = messages[0]?.role === "system" ? messages : [{ role: "system", content: sys }, ...messages];
+
+  const canConstrain = mode === "json_schema" && outlinesWasm && vocabJson && schema?.jsonSchema;
+
+  if (canConstrain) {
+    let handle = null;
+    try {
+      self.postMessage({ type: "status_detail", detail: "Compiling grammar..." });
+      const eosId = tokenizer.model?.config?.eos_token_id
+        ?? tokenizer.config?.eos_token_id
+        ?? (tokenizer.special_tokens_map?.eos_token ? tokenizer.encode(tokenizer.special_tokens_map.eos_token)?.[0] : null)
+        ?? 0;
+      handle = outlinesWasm.compile_index(
+        JSON.stringify(schema.jsonSchema), vocabJson, eosId
+      );
+      const processor = makeGrammarProcessor(handle, outlinesWasm);
+
+      const inputs = tokenizer.apply_chat_template(full, { add_generation_prompt: true, return_dict: true });
+      let fullText = "";
+      const streamer = new TextStreamer(tokenizer, {
+        skip_prompt: true,
+        skip_special_tokens: true,
+        token_callback_function: (toks) => {
+          const lastTok = toks[toks.length - 1];
+          processor.acceptToken(lastTok);
+        },
+        callback_function: (tok) => { fullText += tok; },
+      });
+      stopping.reset();
+      await model.generate({
+        ...inputs,
+        max_new_tokens: 512,
+        do_sample: false,
+        streamer,
+        stopping_criteria: stopping,
+        logits_processor: [processor],
+      });
+
+      const parsed = parseOutput(fullText, mode);
+      if (parsed.ok) {
+        self.postMessage({ type: "done", fullText, mode, structured: { success: true, data: parsed.data, constrained: true } });
+      } else {
+        self.postMessage({ type: "done", fullText, mode, structured: { success: false, error: parsed.error, constrained: true } });
+      }
+      return;
+    } catch (grammarErr) {
+      self.postMessage({ type: "status_detail", detail: "Grammar failed: " + String(grammarErr?.message || grammarErr) });
+    } finally {
+      if (handle !== null) try { outlinesWasm.free_index(handle); } catch {}
+    }
+  }
+
+  let attempt = 0, lastErr = null;
+  while (attempt <= maxRetries) {
+    const msgs = attempt > 0
+      ? [...full, { role: "user", content: "Your previous response was not valid JSON. Respond with ONLY a valid JSON object." }]
+      : full;
+
+    const inputs = tokenizer.apply_chat_template(msgs, { add_generation_prompt: true, return_dict: true });
+    let fullText = "";
+    const streamer = new TextStreamer(tokenizer, {
+      skip_prompt: true,
+      skip_special_tokens: mode !== "tool_call",
+      callback_function: (tok) => { fullText += tok; },
+    });
+    stopping.reset();
+    await model.generate({ ...inputs, max_new_tokens: mode === "plain" ? 1024 : 512, do_sample: false, streamer, stopping_criteria: stopping });
+
+    if (mode === "plain") { self.postMessage({ type: "done", fullText, mode }); return; }
+
+    const parsed = parseOutput(fullText, mode);
+    if (parsed.ok) {
+      const v = validate(parsed.data, mode === "json_schema" ? schema?.jsonSchema : null);
+      if (v.valid) { self.postMessage({ type: "done", fullText, mode, structured: { success: true, data: parsed.data } }); return; }
+      else lastErr = "Validation: " + v.errors.join(", ");
+    } else lastErr = parsed.error;
+
+    attempt++;
+    if (attempt <= maxRetries) { self.postMessage({ type: "retry", attempt, reason: lastErr }); }
+  }
+  self.postMessage({ type: "done", fullText: "", mode, structured: { success: false, error: lastErr } });
+}
+
+/* ── Message handler ───────────────────────────────────────────────── */
+const _handle = async (e) => {
+  const { type, messages, options } = e.data;
+  if (type === "load") {
+    try { self.postMessage({ type: "status", status: "loading" }); await loadModel(p => self.postMessage({ type: "progress", progress: p })); self.postMessage({ type: "status", status: "ready" }); }
+    catch (err) {
+      let msg = err?.message || err;
+      if (typeof msg === "number") msg = "ONNX Runtime failed (code " + msg + "). Possible causes: missing cross-origin isolation headers, unsupported model ops, or insufficient memory.";
+      self.postMessage({ type: "error", error: String(msg || "Unknown error") });
+      self.postMessage({ type: "status", status: "idle" });
+    }
+  }
+  if (type === "generate") {
+    try { self.postMessage({ type: "status", status: "generating" }); await generate(messages, options); }
+    catch (err) { self.postMessage({ type: "error", error: String(err?.message || err || "Unknown error") }); self.postMessage({ type: "status", status: "ready" }); }
+  }
+  if (type === "stop") stopping.interrupt();
+};
+
+self.onmessage = _handle;
+for (const e of _q) await _handle(e);
+})();
+`;
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Preset schemas
+// ═══════════════════════════════════════════════════════════════════════
+const PRESETS = {
+  plain:      { label: "Plain chat", mode: "plain" },
+  sentiment:  {
+    label: "Sentiment analysis", mode: "json_schema",
+    schema: {
+      systemPrompt: 'Analyze the sentiment of the user\'s text. Respond with ONLY a JSON object, no other text.\n\nRequired fields:\n- "sentiment": one of "positive", "negative", "neutral", or "mixed"\n- "confidence": a number between 0 and 1\n- "reasoning": a short explanation\n\nExample: {"sentiment": "positive", "confidence": 0.95, "reasoning": "The text expresses enthusiasm and joy."}',
+      jsonSchema: {
+        type: "object",
+        properties: {
+          sentiment:  { type: "string", enum: ["positive","negative","neutral","mixed"] },
+          confidence: { type: "number" },
+          reasoning:  { type: "string" },
+        },
+        required: ["sentiment","confidence","reasoning"],
+      },
+    },
+  },
+  extraction: {
+    label: "Entity extraction", mode: "json_schema",
+    schema: {
+      systemPrompt: 'Extract named entities from the user\'s text. Respond with ONLY a JSON object, no other text.\n\nRequired fields:\n- "people": array of person names found in the text\n- "organizations": array of organization names found in the text\n- "locations": array of place names found in the text\n- "dates": array of dates or time references found in the text\n\nUse empty arrays if none found.\n\nExample input: "Obama visited Google HQ in Mountain View on March 5th."\nExample output: {"people": ["Obama"], "organizations": ["Google"], "locations": ["Mountain View"], "dates": ["March 5th"]}',
+      jsonSchema: {
+        type: "object",
+        properties: {
+          people:        { type: "array" },
+          organizations: { type: "array" },
+          locations:     { type: "array" },
+          dates:         { type: "array" },
+        },
+        required: ["people","organizations","locations","dates"],
+      },
+    },
+  },
+  tool_call: {
+    label: "Tool calling", mode: "tool_call",
+    schema: { tools: [
+      { name: "get_weather", description: "Get current weather for a location",
+        parameters: { type: "object", properties: { location: { type: "string", description: "City name" }, unit: { type: "string", enum: ["celsius","fahrenheit"], description: "Temperature unit" } }, required: ["location"] } },
+      { name: "search_products", description: "Search a product catalog",
+        parameters: { type: "object", properties: { query: { type: "string", description: "Search query" }, max_results: { type: "number", description: "Max items to return" } }, required: ["query"] } },
+    ]},
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Helpers
+// ═══════════════════════════════════════════════════════════════════════
+function highlightJson(data) {
+  return JSON.stringify(data, null, 2)
+    .replace(/("(?:\\.|[^"\\])*")\s*:/g,   '<span class="json-key">$1</span>:')
+    .replace(/:\s*("(?:\\.|[^"\\])*")/g,    ': <span class="json-str">$1</span>')
+    .replace(/:\s*(\d+\.?\d*)/g,            ': <span class="json-num">$1</span>')
+    .replace(/:\s*(true|false|null)/g,      ': <span class="json-bool">$1</span>');
+}
+
+function formatBytes(b) {
+  if (!b || b < 1024) return (b || 0) + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  App component
+// ═══════════════════════════════════════════════════════════════════════
+async function probeCache() {
+  try {
+    const keys = await caches.keys();
+    const modelCaches = keys.filter(k => k.startsWith("transformers"));
+    if (modelCaches.length === 0) return { cached: false, size: 0, persisted: false };
+    let totalSize = 0;
+    for (const name of modelCaches) {
+      const cache = await caches.open(name);
+      const reqs = await cache.keys();
+      for (const req of reqs) {
+        const res = await cache.match(req);
+        if (res) {
+          const cl = res.headers.get("content-length");
+          if (cl) totalSize += parseInt(cl, 10);
+        }
+      }
+    }
+    const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : false;
+    return { cached: true, size: totalSize, persisted };
+  } catch { return { cached: false, size: 0, persisted: false }; }
+}
+
+function App() {
+  const [messages, setMessages]           = useState([]);
+  const [input, setInput]                 = useState("");
+  const [status, setStatus]               = useState("idle");
+  const [progress, setProgress]           = useState(null);
+  const [error, setError]                 = useState(null);
+  const [preset, setPreset]               = useState("plain");
+  const [structResult, setStructResult]   = useState(null);
+  const [retry, setRetry]                 = useState(null);
+  const [genStart, setGenStart]           = useState(null);
+  const [elapsed, setElapsed]             = useState(0);
+  const [cacheInfo, setCacheInfo]         = useState(null);
+  const worker  = useRef(null);
+  const chatRef = useRef(null);
+  const inpRef  = useRef(null);
+
+  // Auto-scroll
+  useEffect(() => { chatRef.current && (chatRef.current.scrollTop = chatRef.current.scrollHeight); }, [messages, status, structResult]);
+
+  // Elapsed time ticker while generating
+  useEffect(() => {
+    if (status !== "generating" || !genStart) { setElapsed(0); return; }
+    const id = setInterval(() => setElapsed(Date.now() - genStart), 200);
+    return () => clearInterval(id);
+  }, [status, genStart]);
+
+  // Request persistent storage and probe cache on mount + after model loads
+  useEffect(() => {
+    (async () => {
+      if (navigator.storage?.persist) {
+        const granted = await navigator.storage.persist();
+        console.log("[storage] persistent:", granted);
+      }
+      setCacheInfo(await probeCache());
+    })();
+  }, []);
+  useEffect(() => {
+    if (status === "ready") probeCache().then(setCacheInfo);
+  }, [status]);
+
+  // Worker lifecycle
+  useEffect(() => {
+    const blob = new Blob([WORKER_SRC], { type: "text/javascript" });
+    const url  = URL.createObjectURL(blob);
+    const w    = new Worker(url);
+
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === "status") {
+        setStatus(m.status);
+        if (m.status === "ready") setProgress(null);
+        if (m.status === "generating") setGenStart(Date.now());
+      }
+      if (m.type === "progress") {
+        setProgress(prev => {
+          const next = { ...(prev || {}) };
+          if (m.progress?.file) next[m.progress.file] = m.progress;
+          return next;
+        });
+      }
+      if (m.type === "retry")    { setRetry({ attempt: m.attempt, reason: m.reason }); }
+      if (m.type === "done") {
+        setMessages(prev => [...prev, { role: "assistant", content: m.fullText, structured: m.structured || null, mode: m.mode }]);
+        setRetry(null); setGenStart(null);
+        if (m.structured) setStructResult(m.structured);
+        setStatus("ready");
+      }
+      if (m.type === "error") { setError(m.error || "Unknown error"); }
+      if (m.type === "status_detail") { console.log("[worker]", m.detail); }
+    };
+
+    w.onerror = (e) => { setError(String(e.message || "Worker crashed")); setStatus("idle"); };
+
+    worker.current = w;
+    return () => { w.terminate(); URL.revokeObjectURL(url); };
+  }, []);
+
+  const load = useCallback(() => { setError(null); setProgress({}); worker.current?.postMessage({ type: "load" }); }, []);
+
+  const send = useCallback(() => {
+    const txt = input.trim();
+    if (!txt || status !== "ready") return;
+    const p = PRESETS[preset];
+    const userMsg = { role: "user", content: txt };
+    const next = [...messages, userMsg];
+    setMessages(next); setInput(""); setStructResult(null); setRetry(null);
+
+    const chat = p.mode === "plain"
+      ? next.filter(m => m.role !== "system").map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }))
+      : [userMsg];
+    worker.current?.postMessage({ type: "generate", messages: chat, options: { mode: p.mode, schema: p.schema || null, maxRetries: p.mode === "plain" ? 0 : 2 } });
+    inpRef.current?.focus();
+  }, [input, messages, status, preset]);
+
+  const stop = useCallback(() => { worker.current?.postMessage({ type: "stop" }); }, []);
+
+  const resetCache = useCallback(async () => {
+    if (!confirm("Delete cached model data? You will need to re-download ~700 MB.")) return;
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(k => k.startsWith("transformers")).map(k => caches.delete(k)));
+    worker.current?.terminate();
+    location.reload();
+  }, []);
+
+  const p = PRESETS[preset];
+  const fileEntries = progress && typeof progress === "object" ? Object.entries(progress) : [];
+  const totalLoaded = fileEntries.reduce((s, [, f]) => s + (f.loaded || 0), 0);
+  const totalSize   = fileEntries.reduce((s, [, f]) => s + (f.total || 0), 0);
+  const overallPct  = totalSize > 0 ? (totalLoaded / totalSize) * 100 : 0;
+  const doneFiles   = fileEntries.filter(([, f]) => f.status === "done").length;
+  const dotColor = status === "ready" ? "var(--green)" : status === "generating" ? "var(--accent)" : status === "loading" ? "var(--amber)" : "var(--text-dim)";
+  const statusLabel = status === "idle" ? "not loaded" : status === "loading" ? "loading…" : status === "generating" ? "generating…" : "ready";
+  const placeholder = status === "ready"
+    ? (p.mode === "tool_call" ? "Try: What's the weather in Tokyo?" : p.mode === "json_schema" ? "Paste text to analyze…" : "Message LFM2.5…")
+    : status === "generating" ? "Generating…" : "Load the model first";
+
+  // ── Render ──────────────────────────────────────────────────────────
+  return (
+    <div className="app">
+
+      {/* Header */}
+      <div className="header">
+        <div className="header-l">
+          <span className="logo">◆</span>
+          <span className="title">LFM2.5 Structured</span>
+          <span className="badge">WebGPU · Q4</span>
+        </div>
+        <div className="status">
+          <span className="dot" style={{ backgroundColor: dotColor }} />
+          <span className="status-txt">{statusLabel}</span>
+          {cacheInfo?.cached && <span className="cache-tag">{formatBytes(cacheInfo.size)} cached</span>}
+          {cacheInfo?.cached && <button className="reset-btn" onClick={resetCache}>Reset</button>}
+        </div>
+      </div>
+
+      {/* Mode bar */}
+      <div className="mode-bar">
+        {Object.entries(PRESETS).map(([k, v]) => (
+          <button key={k} className={`mode-btn${preset === k ? " active" : ""}`} onClick={() => { setPreset(k); setMessages([]); setStructResult(null); setRetry(null); }}>{v.label}</button>
+        ))}
+      </div>
+
+      {/* Schema preview */}
+      {p.mode !== "plain" && (
+        <div className="schema-bar">
+          <span className="schema-lbl">{p.mode === "tool_call" ? "Tools" : "Schema"}</span>
+          <code className="schema-val">
+            {p.mode === "tool_call"
+              ? p.schema.tools.map(t => t.name).join(", ")
+              : Object.keys(p.schema.jsonSchema.properties || {}).join(", ")}
+          </code>
+        </div>
+      )}
+
+      {/* Chat */}
+      <div className="chat" ref={chatRef}>
+
+        {/* Empty state */}
+        {status === "idle" && messages.length === 0 && (
+          <div className="empty">
+            <div className="empty-icon">◆</div>
+            <h2 className="empty-h">Structured Output</h2>
+            <p className="empty-p">Run LFM2.5 in your browser and get reliable JSON, tool calls, or entity extractions — with schema validation and automatic retry.</p>
+            {error && <div className="error-box" style={{ maxWidth: 420, margin: "6px auto" }}><strong>Error:</strong> {error}</div>}
+            <button className="load-btn" onClick={load}>{error ? "Retry" : "Load Model"}</button>
+            <p className="empty-hint">
+              {cacheInfo?.cached
+                ? `${formatBytes(cacheInfo.size)} cached${cacheInfo.persisted ? " (persistent)" : ""} · WebGPU required`
+                : "~700 MB · Cached after first load · WebGPU required"}
+            </p>
+          </div>
+        )}
+
+        {/* Loading state */}
+        {status === "loading" && (
+          <div className="empty">
+            <div className="spinner" />
+            <div className="load-detail">
+              <p className="load-overall">
+                {totalSize > 0 ? `Loading model · ${overallPct.toFixed(0)}%` : "Initializing WebGPU…"}
+              </p>
+              {totalSize > 0 && (
+                <p className="load-sub">{formatBytes(totalLoaded)} / {formatBytes(totalSize)} · {doneFiles}/{fileEntries.length} files</p>
+              )}
+              {totalSize > 0 && (
+                <div className="prog-track">
+                  <div className="prog-fill" style={{ width: Math.min(overallPct, 100) + "%" }} />
+                </div>
+              )}
+              {fileEntries.length > 0 && (
+                <div className="load-files">
+                  {fileEntries.map(([name, f]) => {
+                    const short = name.split("/").pop();
+                    const isDone = f.status === "done";
+                    const pct = isDone ? 100 : (f.progress || 0);
+                    return (
+                      <div key={name} className="load-file">
+                        <div className="load-file-info">
+                          <span className="load-file-name" title={name}>{short}</span>
+                          <span className={`load-file-stat${isDone ? " done" : ""}`}>
+                            {isDone ? "✓" : f.total ? `${formatBytes(f.loaded || 0)} / ${formatBytes(f.total)}` : pct > 0 ? `${pct.toFixed(0)}%` : "…"}
+                          </span>
+                        </div>
+                        <div className="file-track">
+                          <div className={`file-fill${isDone ? " done" : ""}`} style={{ width: pct + "%" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Messages */}
+        {messages.map((m, i) => (
+          <div key={i} className={`msg-row ${m.role}`}>
+            <div className={m.role === "user" ? "bubble-user" : "bubble-ai"}>
+              {m.role === "assistant" && <span className="bubble-lbl">LFM</span>}
+
+              {/* Raw text — hide when structured parse succeeded */}
+              {(m.mode === "plain" || (!m.structured?.success && !m.structured)) && (
+                <span className="bubble-txt">{m.content}</span>
+              )}
+
+              {/* Valid structured JSON */}
+              {m.structured?.success && m.mode === "json_schema" && (
+                <div className="struct-block">
+                  <div className="struct-header"><span className="struct-badge">{m.structured.constrained ? "✓ Constrained JSON" : "✓ Valid JSON"}</span></div>
+                  <pre className="json-block" dangerouslySetInnerHTML={{ __html: highlightJson(m.structured.data) }} />
+                </div>
+              )}
+
+              {/* Valid tool call */}
+              {m.structured?.success && m.mode === "tool_call" && (
+                <div className="struct-block">
+                  <div className="struct-header"><span className="struct-badge">✓ Tool Call</span></div>
+                  <pre className="json-block" dangerouslySetInnerHTML={{ __html: highlightJson(m.structured.data) }} />
+                </div>
+              )}
+
+              {/* Parse error */}
+              {m.structured && !m.structured.success && (
+                <div className="error-box">Parse failed: {m.structured.error}</div>
+              )}
+            </div>
+          </div>
+        ))}
+
+        {/* Generating indicator */}
+        {status === "generating" && (
+          <div className="msg-row assistant">
+            <div className="bubble-ai">
+              <span className="bubble-lbl">LFM</span>
+              <div className="gen-indicator">
+                <div className="gen-spinner" />
+                <span className="gen-text">Generating…</span>
+                {elapsed > 0 && <span className="gen-elapsed">{(elapsed / 1000).toFixed(1)}s</span>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Retry */}
+        {retry && <div className="retry-box">Retry {retry.attempt}: {retry.reason}</div>}
+
+        {/* Error */}
+        {error && <div className="error-box"><strong>Error:</strong> {error}</div>}
+      </div>
+
+      {/* Input */}
+      <div className="input-bar">
+        <div className="input-row">
+          <input
+            ref={inpRef}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            placeholder={placeholder}
+            disabled={status !== "ready"}
+          />
+          {status === "generating"
+            ? <button className="stop-btn" onClick={stop}>■</button>
+            : <button className="send-btn" onClick={send} disabled={status !== "ready" || !input.trim()} style={{ opacity: status === "ready" && input.trim() ? 1 : 0.35 }}>↑</button>
+          }
+        </div>
+        <p className="disclaimer">
+          {p.mode === "json_schema"
+            ? `Mode: ${p.label} · Grammar-constrained generation · Schema validated`
+            : p.mode === "tool_call"
+            ? `Mode: ${p.label} · Schema validated with retry`
+            : "Running locally · Nothing sent to a server"}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Mount ─────────────────────────────────────────────────────────────
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
